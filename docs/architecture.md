@@ -154,3 +154,187 @@ sequenceDiagram
 | **Custom Assertions** | `utils/assertions.py` | Facade Pattern | High-level assertions that report validations (PASS/FAIL) to the logger automatically. |
 | **Configuration Hook** | `tests/conftest.py` | Hook / Dependency Injection | Instantiates page dependencies and intercepts test failures to capture/attach screenshots to reports. |
 
+---
+
+## 6. Playwright Core Architecture Deep-Dive
+
+To write and maintain enterprise-grade E2E test scripts, it is essential to understand Playwright's low-level engine architecture and how it resolves complex UI automation scenarios.
+
+### A. The Browser Hierarchy: Browser vs. Context vs. Page
+Traditional testing frameworks (like Selenium WebDriver) spawn a full, heavyweight browser binary process for every single test case, resulting in high CPU usage and slow execution times. Playwright operates on a highly optimized, three-tiered structure:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                          1. BROWSER PROCESS                            │
+│ (Heavyweight binary: Chromium, Firefox, WebKit. Bootstrapped once)      │
+└────────────────────────────────────┬───────────────────────────────────┘
+                                     │
+         ┌───────────────────────────┴───────────────────────────┐
+         ▼                                                       ▼
+┌─────────────────────────────────┐                     ┌─────────────────────────────────┐
+│     2. BROWSER CONTEXT (A)      │                     │     2. BROWSER CONTEXT (B)      │
+│ (Virtual "Incognito" isolation. │                     │ (Virtual "Incognito" isolation. │
+│ Fast milliseconds boot time)    │                     │ Fast milliseconds boot time)    │
+└────────┬──────────────┬─────────┘                     └────────┬──────────────┬─────────┘
+         │              │                                        │              │
+         ▼              ▼                                        ▼              ▼
+┌──────────────┐ ┌──────────────┐                       ┌──────────────┐ ┌──────────────┐
+│  3. PAGE (1) │ │  3. PAGE (2) │                       │  3. PAGE (1) │ │  3. PAGE (2) │
+│ (Browser Tab)│ │ (Browser Tab)│                       │ (Browser Tab)│ │ (Browser Tab)│
+└──────────────┘ └──────────────┘                       └──────────────┘ └──────────────┘
+```
+
+1. **Browser**: Spawns a single instance of the target browser engine. This process is resource-intensive and is bootstrapped once per session.
+2. **Browser Context**: An isolated virtual environment created inside the Browser instance. Each Context acts like a completely fresh "Incognito" window, sharing **zero cookies, local storage, or session states** with other contexts. It is extremely fast to spawn (takes milliseconds) and consumes negligible memory. This allows parallel tests to run concurrently on a single CPU without cross-test session contamination.
+3. **Page**: A single tab or window within a Browser Context. You can spawn multiple Pages within a single Context to test multi-tab interactions, cross-page updates, or message synchronizations.
+
+### B. Python Context Managers (Process Lifecycle)
+Playwright relies on a Node.js driver server running in the background. In Python, we manage this driver process elegantly using **Context Managers** (`with` statements). This guarantees clean startup and teardown, preventing orphan browser processes from hanging in memory:
+
+```python
+from playwright.sync_api import sync_playwright
+
+# The 'with' context manager automatically starts and cleans up the browser driver server
+with sync_playwright() as p:
+    # 1. Spawn the heavyweight browser process
+    browser = p.chromium.launch(headless=True)
+    
+    # 2. Spawn an isolated, lightweight context
+    context = browser.new_context()
+    
+    # 3. Open a tab (Page) inside that context
+    page = context.new_page()
+    page.goto("https://www.example.com")
+    
+    # Clean cleanup is automatically handled at the end of the indentation block
+    browser.close()
+```
+
+### C. Advanced UI Interaction Scenarios
+
+#### 1. Handling Pop-ups and Multi-Window Navigation
+When clicking an element triggers a new browser window/tab, standard selectors will fail because the driver is still focused on the original page. Playwright handles this cleanly by listening to context-level events:
+
+```python
+# Expect a new tab/window to spawn as a popup
+with page.context.expect_popup() as popup_info:
+    page.get_by_role("link", name="Open Terms & Conditions").click()
+
+# Grab the active Page handle for the newly spawned popup window
+popup_page = popup_info.value
+popup_page.wait_for_load_state()
+
+# You can now interact with the popup page independently
+print(popup_page.title())
+popup_page.get_by_role("button", name="Close").click()
+```
+
+#### 2. Piercing Shadow DOM and Handling Chatbots (Iframes)
+* **Shadow DOM**: In modern web frameworks (like Web Components, Angular, or Lit), elements are often encapsulated inside a **Shadow DOM**, which is invisible to traditional Selenium CSS/XPath queries. **Playwright pierces Shadow DOMs automatically!** Standard locators (like `page.locator("#my-shadow-element")`) work natively without special configuration.
+* **Iframes (e.g. Chatbots / Catbots)**: Support chatbots and payment widgets are often loaded inside separate iframe nodes to isolate their scripts. To interact with elements inside an iframe, we use `frame_locator()`:
+
+```python
+# 1. Locate the iframe container using a semantic attribute or selector
+chatbot_frame = page.frame_locator("iframe#support-chatbot-widget")
+
+# 2. Directly chain selectors inside that frame
+chatbot_frame.get_by_role("button", name="Chat with Support").click()
+chatbot_frame.get_by_placeholder("Type your message...").fill("Hello, I need help with an order.")
+chatbot_frame.get_by_role("button", name="Send").click()
+```
+
+#### 3. Advanced File Upload and Download Management
+System OS dialogs (like file picker windows or save-as dialogs) cannot be controlled by browser automation. Playwright bypasses this by intercepting the browser's upload and download streams directly:
+
+##### 📤 File Uploads
+For simple file inputs, you can inject files directly using `set_input_files()`:
+```python
+# Directly upload a file to a file input element
+page.get_by_label("Upload Invoice").set_input_files("data/invoice.pdf")
+```
+
+If the upload requires clicking a stylized button that opens an OS file dialog, use the `expect_file_chooser()` context manager:
+```python
+# 1. Prepare to intercept the OS file dialog popup
+with page.expect_file_chooser() as fc_info:
+    page.get_by_text("Select Files to Upload").click()
+
+file_chooser = fc_info.value
+# 2. Inject the files programmatically
+file_chooser.set_files(["data/report1.csv", "data/report2.csv"])
+```
+
+##### 📥 File Downloads
+To automate downloading files, Playwright captures the browser's download event, allowing you to save the binary payload safely:
+```python
+# 1. Intercept the download stream
+with page.expect_download() as download_info:
+    page.get_by_role("button", name="Download Monthly Report").click()
+
+download = download_info.value
+
+# 2. Retrieve details and save the file programmatically
+logger.info(f"Downloading file: {download.suggested_filename}")
+download.save_as(f"downloads/{download.suggested_filename}")
+```
+
+
+This is an exceptionally sharp observation! 
+
+In our project, we do **not** write boilerplate fixtures to manually spin up the `browser`, `browser_context`, or `page` from scratch. Instead, we inherit them **natively** from the **`pytest-playwright`** plugin!
+
+Here is how this integration operates and why it is the standard modern design:
+
+---
+
+### 1. The Native Fixtures We Reuse
+The `pytest-playwright` library automatically injects three extremely well-optimized fixtures into our Pytest scope:
+* **`browser`** *(Session-scoped)*: The actual heavyweight browser engine process (Chromium, Firefox, or WebKit). It boots once per run.
+* **`context`** *(Function-scoped)*: An isolated virtual "incognito" session created automatically for **every single test case** to ensure complete session cleanup.
+* **`page`** *(Function-scoped)*: A fresh, clean tab opened inside that isolated context.
+
+When we define our page object fixtures in `tests/conftest.py`, we simply request this native `page` fixture:
+```python
+@pytest.fixture
+def login_page(page):  # <--- 'page' is injected natively by pytest-playwright!
+    return LoginPage(page)
+```
+
+---
+
+### 2. Why Natively Inheriting is Better Than Manual Setup
+Instead of writing custom fixtures to open/close drivers, inheriting from `pytest-playwright` gives us out-of-the-box support for advanced CLI flags:
+
+* **Automatic Parallelization**: It handles multi-processing via `pytest-xdist` perfectly, assigning a unique browser context to each thread safely.
+* **Multi-Browser Testing**: We can switch the target browser engine directly from the command line without changing a single line of code:
+  ```bash
+  pytest --browser chromium
+  pytest --browser firefox
+  pytest --browser webkit
+  ```
+* **Headed vs. Headless**: We can see the browser execution visually by simply appending `--headed`:
+  ```bash
+  pytest --headed
+  ```
+* **Native Video & Tracing**: We can record execution videos or trace zip files automatically for failed tests using standard flags:
+  ```bash
+  pytest --video retain-on-failure --tracing retain-on-failure
+  ```
+
+---
+
+### 3. How We Configure the Native Fixtures
+Even though we don't write the fixtures from scratch, we still **configure** them inside [tests/conftest.py](file:///d:/end2end_modern_test_framework/tests/conftest.py) by overriding the configuration hook `browser_context_args`:
+
+```python
+@pytest.fixture(scope="session")
+def browser_context_args(browser_context_args):
+    """Overrides the default arguments used by the native 'context' fixture."""
+    return {
+        **browser_context_args,
+        "viewport": {"width": 1280, "height": 800},
+        "ignore_https_errors": True
+    }
+```
+
+This ensures we get the best of both worlds: **zero boilerplate driver management**, combined with **complete control over our configuration**!
