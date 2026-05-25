@@ -1,0 +1,30 @@
+# Python bytecode and files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+
+# Configuration Secrets
+.env
+.env.local
+
+# Logs and Reports
+logs/
+reports/
+test-results/
+playwright-report/
+.playwright/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
