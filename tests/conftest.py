@@ -5,6 +5,7 @@ from utils.logger import logger
 from pages.login_page import LoginPage
 from pages.inventory_page import InventoryPage
 from pages.cart_page import CartPage
+from utils.test_data import UserFactory, ProductFactory
 
 # Load configurations from .env at runtime initialization
 env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
@@ -60,6 +61,39 @@ def inventory_page(page):
 def cart_page(page):
     """Injects initialized CartPage into tests."""
     return CartPage(page)
+
+# -----------------------------------------------------------------------------
+# Test Data Factory Fixtures
+# -----------------------------------------------------------------------------
+@pytest.fixture
+def standard_user_data():
+    """Injects pre-built standard user for tests."""
+    return UserFactory.standard_user()
+
+@pytest.fixture
+def locked_user_data():
+    """Injects pre-built locked-out user for tests."""
+    return UserFactory.locked_user()
+
+@pytest.fixture
+def admin_user_data():
+    """Injects pre-built admin user for tests."""
+    return UserFactory.admin_user()
+
+@pytest.fixture
+def sample_products_data():
+    """Injects all SauceDemo inventory products for tests."""
+    return ProductFactory.all_products()
+
+@pytest.fixture
+def sample_user_builder():
+    """Injects UserFactory.builder() for custom user creation."""
+    return UserFactory.builder()
+
+@pytest.fixture
+def sample_product_builder():
+    """Injects ProductFactory.builder() for custom product creation."""
+    return ProductFactory.builder()
 
 # -----------------------------------------------------------------------------
 # Pytest Hooks for Advanced Reporting & Screen Capture
